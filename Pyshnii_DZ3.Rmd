@@ -1,0 +1,377 @@
+---
+title: "Pyshnii_DZ3"
+author: "Artem Pyshnii Alexsandrovich"
+date: "2025-04-03"
+output: html_document
+---
+
+### Домашнее задание часть 1
+
+Копируем код из файла DS_05032025_practice.Rmd для выполнения домашнего задания по набору данных об ураганах в Карибском бассейне.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+```
+
+```{r}
+# дистанционное построчное чтение файла
+#storm_file_complete <- read_file("https://www.nhc.noaa.gov/data/hurdat/hurdat2-1851-2023-051124.txt")
+storm_file_complete <- read_file("raw_storms.txt")
+storm_strings <- read_lines(storm_file_complete)
+
+#прикладываю также файл для того случая, если скачать не получается: raw_storms.txt
+```
+
+```{r}
+#строки с названиями штормов имеют по три запятые вместо 9, определим их индексы
+header_locations <- str_count(storm_strings, "\\,") == 3
+header_locations <- (1:length(storm_strings))[header_locations]
+#конструкция (1:length(storm_strings)) представляет собой вектор с подряд идущими значениями от 1 до длины датасета, то есть просто порядковый индекс
+
+
+headers <- as.list(storm_strings[header_locations]) #строки с заголовками
+#функция map() из пакета purrr позволяет применить функцию к каждому элементу листа
+headers_df <- headers %>%
+    map(str_sub, start = 1, end = -2) %>% # удалить остаточную запятую
+  map(paste0, "\n") %>%                 # добавить символ конца строки
+  map_df(read_csv, col_names = c("id", "name", "n_obs"), col_types = "cci") %>% #преобразование в таблицу данных
+  mutate(name = recode(name, "UNNAMED" = id), skip = header_locations) %>% #современные шторма называют по имени, однако боле ранние имеют вместо имени идентификатор UNNAMED. Лучше в таких случаях использовать другое название, например, уникальный id.
+  select(id, name, skip, n_obs)
+
+```
+
+```{r}
+# блок посвящен чтению остальных наблюдений, добавлению их к созданым строкам с названиями штормов
+#первым шагом определим типы и названия переменных датасета.
+#обратите внимание на функцию col_integer() и col_character() из пакета vroom. Это варианты функции vroom::cols, которая позволяет гибко определять колонки данных, в том числе сразу указывать характеристики фактора, его уровни, упорядоченность и т.д. 
+#?vroom::cols
+column_types <- list(
+  date = col_character(),
+  time = col_character(),
+  record_type = col_character(),
+  status = col_character(),
+  lat = col_character(),
+  long = col_character(),
+  wind = col_integer(),
+  pressure = col_integer(),
+  extent_34_NE = col_integer(),
+  extent_34_SE = col_integer(),
+  extent_34_SW = col_integer(),
+  extent_34_NW = col_integer(),
+  extent_50_NE = col_integer(),
+  extent_50_SE = col_integer(),
+  extent_50_SW = col_integer(),
+  extent_50_NW = col_integer(),
+  extent_64_NE = col_integer(),
+  extent_64_SE = col_integer(),
+  extent_64_SW = col_integer(),
+  extent_64_NW = col_integer(),
+  nas = col_integer()
+)
+column_names <- names(column_types)
+
+#вообще говоря, в R нельзя делать вектор из листов, но такая строка автоматически сгенерирует лист из листов.
+storm_dataframes <- vector("list", nrow(headers_df))
+
+for (i in 1:nrow(headers_df)) { #для каждого урагана
+  # вычислим строки, в которых содержатся наблюдения о нем
+  row_start = headers_df[i,]$skip + 1  
+  row_end = headers_df[i,]$n_obs + row_start - 1
+  # и извлечем соответствующий набор данных для отдельного урагана, сначала построчно 
+  data_subset = storm_strings[row_start:row_end] %>%
+    paste(collapse = "\n") %>%
+    paste0("\n")
+  #...затем как csv.
+  data_subset = read_csv(
+    data_subset,
+    col_names = column_names,
+    col_types = column_types,
+    na = c("", "-99", "-999")
+  )
+  problems()
+  
+  data_subset$name = headers_df[i,]$name
+  data_subset = data_subset %>% relocate(name) #в начале поставим имя урагана
+  data_subset$id = headers_df[i,]$id
+  data_subset = data_subset %>% relocate(id) #в начале поставим и id
+
+  storm_dataframes[[i]] = data_subset
+}
+
+# объединим информацию обо всех штормах в одну таблицу
+storms <- storm_dataframes %>%
+  bind_rows()
+```
+
+```{r}
+library(lubridate) #для работы с датами
+
+storms <- storms %>%
+  mutate(
+    date = ymd(date),
+    year = year(date),
+    month = month(date),
+    day = day(date),
+    hour = as.numeric(str_sub(time, 1, 2)),
+    lat_hemisphere = str_sub(lat, -1),
+    lat_sign = if_else(lat_hemisphere == "N", 1, -1),
+    lat = as.numeric(str_sub(lat, 1, -2)) * lat_sign,
+    long_hemisphere = str_sub(long, -1),
+    long_sign = if_else(long_hemisphere == "E", 1, -1),
+    long = as.numeric(str_sub(long, 1, -2)) * long_sign,
+    # wind = wind * 1.15078, # transforms knots to mph,
+    TSradius1 = extent_34_NE + extent_34_SW,
+    TSradius2 = extent_34_NW + extent_34_SE,
+    tropicalstorm_force_diameter = pmax(TSradius1, TSradius2),
+    HUradius1 = extent_64_NE + extent_64_SW,
+    HUradius2 = extent_64_NW + extent_64_SE,
+    hurricane_force_diameter = pmax(HUradius1, HUradius2)
+  )
+```
+
+```{r}
+#в этом чанке приведены примеры того, что и как можно еще изменить в датасете для целей анализа.
+
+
+# атмосферное давление является ключевым при анализе штормов, можно отфильтровать датасет по тем строкам, где указано давление.
+storms <- storms %>%
+  filter(!is.na(pressure))
+
+
+#можно отказаться от аббревиатур; но на графиках аббревиатуры часто смотрятся лучше, чем полные названия. Однако при автоматизации вывода таблиц --- наоборот.
+storms <- storms %>% mutate(
+  status = factor(recode(status,
+                         "HU" = "hurricane",
+                         "TS" = "tropical storm",
+                         "TD" = "tropical depression",
+                         "EX" = "extratropical",
+                         "SD" = "subtropical depression",
+                         "SS" = "subtropical storm",
+                         "LO" = "other low",
+                         "WV" = "tropical wave",
+                         "DB" = "disturbance"
+  ))
+)
+
+# существует общепринятая классификация ураганов по скорости ветра
+# hurricane category
+storms <- storms %>%
+  mutate(category = case_when(
+    status != "hurricane" ~ NA,
+    wind >= 137 ~ 5,
+    wind >= 113 ~ 4,
+    wind >= 96 ~ 3,
+    wind >= 83 ~ 2,
+    wind >= 64 ~ 1,
+    .default = NA
+  )) %>%
+  relocate(category, .after = status)
+
+#Для простоты и валидности можно рассмотреть только недавнюю историю ураганов с 1975 года
+storms_short <- storms %>%
+  # drop historical data for simplicity and backwards compatibility
+  filter(year >= 1975) %>%
+  # drop some columns
+  select(name, year, month, day, hour, lat, long, status, category, wind, pressure, tropicalstorm_force_diameter, hurricane_force_diameter)
+
+```
+
+Код выше помогает из нестандартно отформатированных данных получить классическую таблицу + выполняет дополнительную предобработку.
+
+Задание 1. Нарисуйте, пожалуйста, зависимость средних характеристик штормов (*минимальное* давление и *максимальная* скорость ветра для каждого шторма) от времени в том числе с **разбивкой по типу шторма(category)**. 
+
+```{r}
+#Делаем выборку из данных для построения необходимых графиков 
+storms_short_DZ <- storms_short %>% group_by(year, name, category) %>% summarise(max_wind = max(wind), min_pressure = min(pressure))
+
+#Выводим данные в табличном формате
+library(kableExtra)
+kable(storms_short_DZ %>% filter(year > 1995) %>% group_by(year) %>% summarise(m1 = round(mean(max_wind)), m2 = round(mean(min_pressure))))
+```
+
+```{r}
+library(ggplot2)
+#Нарисуем графики зависимости средних характеристик (максимальная скорость ветра и минимальное давление) от времени с разбивкой по типу шторма
+storms_short_DZ %>% group_by(year) %>% summarise(m1 = round(mean(max_wind)), cat = base::max(category, na.rm = TRUE)) %>% 
+  ggplot(aes(x=year, y=m1, color = as.factor(cat))) + 
+  geom_line(size=1.5) + 
+  geom_point(shape=21, color="black", fill="#69b3a2", size=4) +
+  theme_bw() + 
+  labs(x="Год", y="Максимальная скорость ветра") + 
+  scale_color_discrete(name="Категория")
+
+storms_short_DZ %>% group_by(year) %>% summarise(m1 = round(mean(min_pressure)), cat = base::max(category, na.rm = TRUE)) %>% 
+  ggplot(aes(x=year, y=m1, color = as.factor(cat))) + 
+  geom_line(size=1.5) + 
+  geom_point(shape=21, color="black", fill="#69b3a2", size=4) +
+  theme_bw() + 
+  labs(x="Год", y="Минимальное давление") + 
+  scale_color_discrete(name="Категория")
+```
+
+Задание 2. Выберите любые 15 лет после 2000 года и до 1990 года. Проверьте гипотезу о том, что среднее значение минимального давления и максимальной скорости ветра отличаются. 
+
+```{r}
+old <- storms_short_DZ %>% filter((year>=1975)&(year<1990))
+new <- storms_short_DZ %>% filter((year>=2005)&(year<2020))
+
+test_result <- t.test(old$max_wind, new$max_wind)
+round(test_result$statistic, 2)
+round(test_result$p.value, 2)
+```
+
+На уровне значимости p=0.05 нулевая гипотеза не отклоняется, значит среднее значение максимальной скорости ветра не отличается для групп с 1975 по 1990 год и с 2005 по 2020 год.
+
+```{r}
+test_result <- t.test(old$min_pressure, new$min_pressure)
+round(test_result$statistic, 2)
+round(test_result$p.value, 2)
+```
+На уровне значимости p=0.05 различия значимы, поэтому нулевая гипотеза отклоняется, значит среднее значение минимального давления отличается для групп с 1975 по 1990 год и с 2005 по 2020 год.
+
+### Домашнее задание часть 2
+
+Копируем код из файла DS_05032025_practice.Rmd для выполнения домашнего задания по набору данных продаж из супермаркета.
+
+```{r}
+supermarket_sales <- read_csv("supermarket_sales.csv")
+
+supermarket_sales_1 <- supermarket_sales %>% select(-`City`, -`gross margin percentage`, -`gross income`, -`Tax 5%`, -`Time`, -`Date`, -`cogs`) %>% rename_all(function(x) gsub(" ", "_", x)) %>% rename_all(function(x) tolower(x))
+#для удобства обращения к столбцам данных несколько изменим названия столбцов. Названия с пробелом тоже допустимы, но к ним приходится обращаться через одиночные кавычки.
+#отметим, что так как мы убрали несколько стобцов, таблицу стало воспринимать удобнее.
+head(supermarket_sales_1)
+```
+
+Задание 1. Выведите таблицу средних значений общих затрат (признак total), разбитую по полу и по филиалу. Наблюдаются ли какие-либо зависимости? Проверьте 1-2 из них при помощи сответвующего критерия.
+
+```{r}
+#Создаём таблицу средних значений общих затрат, разбитую по полу и по филиалу
+mean_total_table <- supermarket_sales_1 %>%
+  group_by(gender, branch) %>%
+  summarise(
+    mean_total = round(mean(total, na.rm = TRUE), 2),
+    .groups = "drop") %>%
+  pivot_wider(
+    names_from = branch,
+    values_from = mean_total
+  )
+
+print(mean_total_table)
+```
+
+Наблюдается зависимость, что средние общие затраты у женщин больше, чем у мужчин.
+
+```{r}
+female_total <- supermarket_sales_1 %>% filter(gender == "Female") %>% pull(total)
+male_total <- supermarket_sales_1 %>% filter(gender == "Male") %>% pull(total)
+
+#Проверим данные на нормальность распределения по тесту Шапиро
+shapiro.test(female_total)
+shapiro.test(male_total)
+```
+Так как данные распределены ненормально, то корректно будет использовать тест Манни-Уитни для независимых выборок.
+
+```{r}
+wilcox.test(female_total, male_total, alternative = "greater")
+```
+На уровне значимости p=0.05 p-value находится ровно на границе, при строгом уровне значимости можно не отклонять нулевую гипотезу и сказать, что общие траты женщин не превышают общие траты мужчин. Или можно выбрать уровень значимости p=0.01 и уверенно сказать, что нулевая гипотеза выполняется, чтобы не давать ложных открытий.
+Но на самом деле результат требует дополнительных данных и проверок.
+
+```{r}
+ggplot(supermarket_sales_1, aes(x = gender, y = total, fill = gender)) +
+  geom_boxplot() +
+  labs(title = "Распределение общих затрат по полу", 
+       x = "Пол", y = "Затраты (Total)")
+```
+У обоих полов имеются выбросы превышающие значение Total = 1000
+
+```{r}
+ggplot(supermarket_sales_1, aes(x = total, fill = gender)) +
+  geom_histogram(
+    alpha = 0.6,
+    position = "identity",
+    bins = 100,
+    color = "white"
+  ) +
+  labs(
+    title = "Распределение общих затрат (Total) по полу",
+    x = "Общие затраты (Total)",
+    y = "Количество покупок",
+    fill = "Пол"
+  ) +
+  scale_fill_manual(values = c("Female" = "#F8766D", "Male" = "#00BFC4")) +
+  theme_minimal() +
+  facet_wrap(~gender)
+```
+У двух графиков наблюдается перекос вправо, попробуем найти точки, которые превышают Total = 1000.
+
+```{r}
+which(supermarket_sales_1$total > 1000)
+```
+Эти 9 точек можно счесть выбросами и удалить их из набора данных
+
+```{r}
+supermarket_sales_1$gender[c(which(supermarket_sales_1$total > 1000))]
+```
+3 точки относятся к классу Male, а 6 - Female, поэтому удаление не сильно сместит гендерный баланс.
+
+```{r}
+supermarket_sales_clean <- supermarket_sales_1 %>%
+  filter(total <= 1000)
+which(supermarket_sales_clean$total > 1000) 
+```
+
+```{r}
+female_total <- supermarket_sales_clean %>% filter(gender == "Female") %>% pull(total)
+male_total <- supermarket_sales_clean %>% filter(gender == "Male") %>% pull(total)
+
+wilcox.test(female_total, male_total, alternative = "greater")
+```
+После повторной проверки и обработки набора данных, на уровне значимости p=0.05 нулевая гипотеза не отклоняется, значит общие траты женщин не превышают мужские.
+
+Задание 2. Изобразите количество покупателей в каждом супермаркете с разбивкой по полу(или любую другую трехуровневую таблицу сопряженности --- 3way contingency table)  с помощью [группированной столбчатой диаграммы]( https://r-graph-gallery.com/48-grouped-barplot-with-ggplot2.html ).
+
+```{r}
+# Считаем количество покупателей по branch и gender
+count_data <- supermarket_sales_1 %>%
+  group_by(branch, gender) %>%
+  summarise(
+    count = n(),
+    .groups = "drop"
+  )
+
+# Вывод таблицы (для проверки)
+print(count_data)
+```
+
+```{r}
+ggplot(count_data, aes(x = branch, y = count, fill = gender)) +
+  geom_bar(
+    stat = "identity",      # Используем точные значения из count
+    position = "dodge",     # Группировка столбцов рядом
+    width = 0.7,            # Ширина столбцов
+    color = "white"         # Границы столбцов
+  ) +
+  scale_fill_manual(
+    values = c("Female" = "#F8766D", "Male" = "#00BFC4"),  # Цвета
+    name = "Пол"                                           # Название легенды
+  ) +
+  labs(
+    title = "Количество покупателей по филиалам и полу",
+    x = "Филиал",
+    y = "Количество покупателей",
+    fill = "Пол"
+  ) +
+  theme_minimal() +          # Минималистичный стиль
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),  # Центрирование заголовка
+    legend.position = "top"                                 # Легенда сверху
+  ) +
+  geom_text(
+    aes(label = count),      # Подписи значений
+    position = position_dodge(width = 0.7),
+    vjust = -0.5,           # Сдвиг подписей вверх
+    size = 3.5
+  )
+```
