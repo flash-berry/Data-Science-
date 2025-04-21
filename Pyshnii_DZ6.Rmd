@@ -1,0 +1,277 @@
+---
+title: "Pyshnii_DZ6"
+author: "Artem Pyshnii Alexsandrovich"
+date: "2025-04-15"
+output: html_document
+---
+
+Загрузим датасет melb_data c ценами на дома и их характеристиками.
+```{r}
+library(readr)
+library(dplyr)
+library(ggplot2)
+
+df <- read_csv("C:/Users/User/Desktop/Data Science/melb_data.csv")
+```
+Проведём предобработку датасета.
+```{r}
+df <- df %>% select(-Address, -Method, -SellerG, -Postcode, -CouncilArea, -Lattitude, -Longtitude, -Date, -Suburb, -Regionname)
+
+df$Type <- factor(df$Type)
+
+df <- na.omit(df)
+```
+
+## Проблема мультиколлинеарности в модели
+
+Разобьём датасет на две подвыборки: тренировочную и тестовую в пропорциях 0.8/0.2 соответственно по целевому признаку Price.
+```{r}
+library(caret)
+
+set.seed(123)
+
+df_partition <- df$Price %>%
+  createDataPartition(p = 0.8, list = FALSE)
+
+df_train  <- df[df_partition, ]
+df_test <- df[-df_partition, ]
+```
+
+Посмотрим на матрицу корреляций в наборе данных.
+```{r}
+library(corrplot)
+
+corrplot(cor(df %>% select(-Type)))
+```
+В датасете, помимо корреляций с целевым признаком Price, существуют корреляции между признаками предикаторами.
+Построим модель линейной регрессии для данного датасета.
+```{r}
+model1 <- lm(Price ~ ., data = df_train)
+
+summary(model1)
+```
+Оценим качество предсказаний модели на тестовой подвыборке.
+```{r}
+df_predict1 <- model1 %>% predict(df_test)
+
+data.frame(
+  RMSE = RMSE(df_predict1, df_test$Price),
+  R2 = R2(df_predict1, df_test$Price)
+)
+```
+Показетель R2 = 0.579447, что говорит о среднем качестве предсказаний модели.
+Определим есть ли в датасете мульколлениарность с помощью метода **VIF --- variance inflation factor**.
+```{r message=FALSE, warning=FALSE}
+library(car)
+
+vif(model1)
+```
+Согласно анализу показателей VIF, мультиколлинеарность возникает при учете признаков Rooms и Bedroom2. Остальные признаки имеют слабую мультиколлинеарность.
+
+**[Число обусловленности --- Condition number --- каппа матрицы]**
+```{r}
+df_train_0 <- df_train[,-2]-colMeans(df_train[,-2])[col(df_train[,-2])]
+df_model1_0 <- lm(Price ~ ., data = df_train_0)
+df_model2_0 <- lm(Price ~ .-Rooms - Bedroom2, data = df_train_0)
+```
+
+```{r}
+kappa(df_model1_0)
+kappa(df_model2_0)
+```
+Исключение признаков Rooms и Bedroom2 позволяет снизить число обусловеленности, но не привести его к пороговому значению 30.
+Исключим зависимые признаки и построим модель без них.
+```{r}
+model2 <- lm(Price ~ .-Bedroom2 - Rooms, data = df_train)
+
+summary(model2)
+```
+```{r message=FALSE, warning=FALSE}
+vif(model2)
+```
+
+```{r}
+df_predict2 <- model2 %>% predict(df_test)
+
+data.frame(
+  RMSE = RMSE(df_predict2, df_test$Price),
+  R2 = R2(df_predict2, df_test$Price)
+)
+```
+**Итого:** исключив мультиколлинеарные признаки, метрики предсказаний незначительно улучшились, однако коэффициенты регрессии стали стабильнее.
+
+## Проблема переподгонки модели (overfitting)
+
+#### Leave-one-out cross-validation
+```{r}
+train.loocv <- trainControl(method = "LOOCV")
+
+model.loocv <- train(Price ~.,
+                     data = df,
+                     method = "lm",
+                     trControl = train.loocv)
+
+print(model.loocv)
+```
+
+
+#### K-fold cross-validation
+```{r}
+
+train.kfold <- trainControl(method = "cv", number = 5)
+
+model.kfold <- train(Price ~.,
+                     data = df,
+                     method = "lm",
+                     trControl = train.kfold)
+
+### Present results
+print(model.kfold)
+```
+####  Повторяющаяся K-fold cross-validation
+```{r}
+train.rkfold <- trainControl(method = "repeatedcv", number = 5, repeats = 3)
+
+model.rkfold <- train(Price ~.,
+                     data = df,
+                     method = "lm",
+                     trControl = train.rkfold)
+
+print(model.rkfold)
+```
+**Итог:** качество предсказаний при перекрёстных проверках не сильно отличается от качества предсказаний на обучающей выборке, следовательно переподгонки не происходит.
+
+## Представление графических изображений построенной модели.
+
+```{r}
+ggplot(df, aes(x = Price)) +
+  geom_histogram(
+    aes(y = after_stat(density)),
+    fill = "#69b3a2",
+    color = "#e9ecef",
+    alpha = 0.8
+  ) +
+  geom_density(
+    color = "#e34a33",
+    size = 1.2,
+    adjust = 1.5
+  ) +
+  labs(
+    title = "Распределение цен на недвижимость",
+    subtitle = "Гистограмма с линией плотности",
+    x = "Цена (доллары)",
+    y = "Плотность",
+    caption = "Данные: Melbourne Housing Dataset"
+  )
+```
+```{r}
+ggplot(df, aes(x = factor(Rooms), y = Price)) +
+  geom_boxplot(
+    fill = "#4285F4",
+    color = "#1A365D",
+    alpha = 0.8,              
+    outlier.shape = 21,       
+    outlier.fill = "#EA4335", 
+    outlier.color = "white",  
+    outlier.size = 2        
+  ) +
+  stat_summary(
+    fun = median, 
+    geom = "point", 
+    shape = 21,
+    size = 3,
+    fill = "white",
+    color = "#1A365D"
+  ) +
+  labs(
+    title = "Распределение цен на недвижимость по количеству комнат",
+    x = "Количество комнат",
+    y = "Цена",
+    caption = "Данные: Melbourne Housing Market\nКрасные точки - выбросы, белые точки - медианы"
+  ) 
+```
+```{r}
+ggplot(df, aes(x = Distance, y = Price)) +
+  geom_point(
+    alpha = 0.4,               
+    color = "#4285F4",         
+    size = 2.5,                
+    shape = 19                 
+  ) +
+  geom_smooth(
+    method = "loess",
+    color = "#EA4335",         
+    fill = "#FBBC05",          
+    size = 1.5,                
+    alpha = 0.2                
+  ) +
+  labs(
+    title = "Зависимость цены недвижимости от расстояния до центра",
+    x = "Расстояние до центра города, км",
+    y = "Цена недвижимости",
+    caption = "Данные: Melbourne Housing Market\nКрасная линия показывает нелинейный тренд"
+  ) +
+  annotate(
+    "text",
+    x = max(df$Distance)*0.8,
+    y = max(df$Price)*0.9,
+    label = "Ближе к центру\nцены выше",
+    color = "#EA4335",
+    size = 4.5,
+    fontface = "bold"
+  )
+```
+```{r}
+library(corrplot)
+num_vars <- df %>% select(where(is.numeric))
+corrplot(cor(num_vars, use = "complete.obs"), method = "color", type = "upper")
+```
+```{r}
+ggplot(df, aes(x = Rooms, y = Bedroom2)) +
+  geom_jitter(
+    alpha = 0.4,                
+    width = 0.25,               
+    height = 0.25,              
+    color = "#4285F4",          
+    size = 2.5                  
+  ) +
+  geom_abline(
+    slope = 1, 
+    intercept = 0, 
+    color = "#EA4335",          
+    size = 1.2,                 
+    linetype = "dashed"       
+  ) +
+  labs(
+    title = "Сравнение количества комнат (Rooms) и спален (Bedroom2)",
+    subtitle = "Каждая точка представляет один объект недвижимости",
+    x = "Общее количество комнат",
+    y = "Количество спален",
+    caption = "Красная пунктирная линия показывает идеальное соответствие\nДанные: Melbourne Housing Market"
+  )
+```
+```{r}
+plot_data <- df %>%
+  group_by(Rooms, Type) %>%
+  summarise(Mean_Price = mean(Price, na.rm = TRUE),
+  .groups = "drop")
+
+ggplot(plot_data, aes(x = factor(Rooms), y = Mean_Price, fill = Type)) +
+  geom_col(
+    position = position_dodge(width = 0.8),
+    width = 0.7,
+    color = "white",  
+    size = 0.3        
+  ) +
+  scale_fill_manual(
+    values = c("#4285F4", "#34A853", "#EA4335"),  
+    labels = c("House", "Townhouse", "Unit"),     
+    name = "Тип недвижимости"                     
+  ) +
+  labs(
+    title = "Средняя цена недвижимости по количеству комнат и типу",
+    x = "Количество комнат",
+    y = "Средняя цена",
+    caption = "Данные: Melbourne Housing Market"
+  )
+```
